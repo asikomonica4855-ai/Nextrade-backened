@@ -1,7 +1,25 @@
-const WebSocket = require("ws");
 const http = require("http");
+const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 10000;
+
+const symbols = [
+  "1HZ100V",
+  "1HZ75V",
+  "1HZ50V",
+  "1HZ25V",
+  "1HZ10V",
+  "R_100",
+  "R_75",
+  "R_50",
+  "R_25",
+  "R_10"
+];
+
+let deriv = null;
+let derivConnected = false;
+
+const clients = new Set();
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, {
@@ -10,7 +28,8 @@ const server = http.createServer((req, res) => {
 
   res.end(JSON.stringify({
     service: "NEXTRADE Live Data",
-    status: "online"
+    status: "online",
+    derivConnected
   }));
 });
 
@@ -18,39 +37,58 @@ const wss = new WebSocket.Server({
   server
 });
 
-let deriv;
-let derivConnected = false;
+function broadcast(message) {
 
-const clients = new Set();
+  const text = JSON.stringify(message);
+
+  clients.forEach(client => {
+
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(text);
+    }
+
+  });
+
+}
 
 function connectToDeriv() {
 
+  if (deriv) {
+    try {
+      deriv.close();
+    } catch (e) {}
+  }
+
+  derivConnected = false;
+
+  broadcast({
+    type: "status",
+    connected: false
+  });
+
   console.log("Connecting to Deriv...");
 
+  /*
+   * Public Deriv market-data WebSocket.
+   */
   deriv = new WebSocket(
-    "wss://ws.binaryws.com/websockets/v3"
+    "wss://api.derivws.com/trading/v1/options/ws/public"
   );
 
   deriv.on("open", () => {
 
-    console.log("Connected to Deriv");
+    console.log("Deriv WebSocket connected");
 
     derivConnected = true;
 
-    // Subscribe to the markets NEXTRADE uses
-    const symbols = [
-      "1HZ100V",
-      "1HZ75V",
-      "1HZ50V",
-      "1HZ25V",
-      "1HZ10V",
-      "R_100",
-      "R_75",
-      "R_50",
-      "R_25",
-      "R_10"
-    ];
+    broadcast({
+      type: "status",
+      connected: true
+    });
 
+    /*
+     * Subscribe to each market.
+     */
     symbols.forEach(symbol => {
 
       deriv.send(JSON.stringify({
@@ -62,57 +100,53 @@ function connectToDeriv() {
 
   });
 
-
-  deriv.on("message", message => {
+  deriv.on("message", raw => {
 
     try {
 
       const data =
-        JSON.parse(message.toString());
+        JSON.parse(raw.toString());
 
-      if (data.msg_type !== "tick") {
-        return;
+      console.log(
+        "DERIV MESSAGE:",
+        JSON.stringify(data)
+      );
+
+      /*
+       * Forward actual tick messages.
+       */
+      if (
+        data.msg_type === "tick" &&
+        data.tick
+      ) {
+
+        broadcast({
+          type: "tick",
+          data: {
+            symbol: data.tick.symbol,
+            price: Number(data.tick.quote),
+            epoch: Number(data.tick.epoch)
+          }
+        });
+
       }
 
-      const tick = {
+      /*
+       * Forward API errors to the browser.
+       */
+      if (data.error) {
 
-        symbol:
-          data.tick.symbol,
+        broadcast({
+          type: "deriv_error",
+          error: data.error
+        });
 
-        price:
-          Number(data.tick.quote),
+      }
 
-        epoch:
-          Number(data.tick.epoch)
-
-      };
-
-
-      // Send the live tick to every NEXTRADE browser
-      clients.forEach(client => {
-
-        if (
-          client.readyState ===
-          WebSocket.OPEN
-        ) {
-
-          client.send(
-            JSON.stringify({
-              type: "tick",
-              data: tick
-            })
-          );
-
-        }
-
-      });
-
-    }
-
-    catch(error) {
+    } catch (error) {
 
       console.error(
-        "Message error:",
+        "Unable to parse Deriv message:",
         error.message
       );
 
@@ -120,43 +154,58 @@ function connectToDeriv() {
 
   });
 
+  deriv.on("error", error => {
 
-  deriv.on("close", () => {
-
-    console.log(
-      "Deriv connection closed"
+    console.error(
+      "Deriv WebSocket error:",
+      error.message
     );
 
     derivConnected = false;
 
-    setTimeout(
-      connectToDeriv,
-      3000
-    );
+    broadcast({
+      type: "status",
+      connected: false,
+      error: error.message
+    });
 
   });
 
+  deriv.on("close", (code, reason) => {
 
-  deriv.on("error", error => {
+    console.log(
+      "Deriv connection closed:",
+      code,
+      reason ? reason.toString() : ""
+    );
 
-    console.error(
-      "Deriv error:",
-      error.message
+    derivConnected = false;
+
+    broadcast({
+      type: "status",
+      connected: false,
+      closeCode: code
+    });
+
+    /*
+     * Reconnect after 5 seconds.
+     */
+    setTimeout(
+      connectToDeriv,
+      5000
     );
 
   });
 
 }
 
-
 wss.on("connection", client => {
 
   console.log(
-    "NEXTRADE client connected"
+    "NEXTRADE browser connected"
   );
 
   clients.add(client);
-
 
   client.send(
     JSON.stringify({
@@ -165,22 +214,17 @@ wss.on("connection", client => {
     })
   );
 
-
   client.on("close", () => {
 
     clients.delete(client);
 
     console.log(
-      "NEXTRADE client disconnected"
+      "NEXTRADE browser disconnected"
     );
 
   });
 
 });
-
-
-connectToDeriv();
-
 
 server.listen(
   PORT,
@@ -188,8 +232,10 @@ server.listen(
   () => {
 
     console.log(
-      `NEXTRADE backend running on port ${PORT}`
+      `NEXTRADE backend listening on ${PORT}`
     );
+
+    connectToDeriv();
 
   }
 );
