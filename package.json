@@ -1,1 +1,12 @@
-
+{
+  "name": "nextrade-backend",
+  "version": "1.0.0",
+  "description": "NEXTRADE live Deriv market data backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
