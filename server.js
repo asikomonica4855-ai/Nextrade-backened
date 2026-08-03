@@ -4,17 +4,28 @@ const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 10000;
 
-const DERIV_CLIENT_ID = process.env.DERIV_CLIENT_ID;
+const DERIV_CLIENT_ID =
+    process.env.DERIV_CLIENT_ID;
 
-const BACKEND_URL = "https://nextrade-backened.onrender.com";
-const FRONTEND_URL = "https://asikomonica4855-ai.github.io/Nextrade";
+const BACKEND_URL =
+    "https://nextrade-backened.onrender.com";
+
+const FRONTEND_URL =
+    "https://asikomonica4855-ai.github.io/Nextrade";
 
 const DERIV_REDIRECT_URI =
     process.env.DERIV_REDIRECT_URI ||
-    "https://nextrade-backened.onrender.com/oauth/callback";
+    `${BACKEND_URL}/oauth/callback`;
 
+/*
+ * IMPORTANT:
+ * Include the Deriv App ID in the WebSocket URL.
+ * This fixes the 401 Unauthorized WebSocket error.
+ */
 const DERIV_WS_URL =
-    "wss://ws.derivws.com/websockets/v3";
+    `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(
+        DERIV_CLIENT_ID || ""
+    )}`;
 
 const SYMBOLS = [
     "1HZ100V",
@@ -66,11 +77,16 @@ function sendJson(res, status, data) {
     setCors(res);
 
     res.writeHead(status, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store"
+        "Content-Type":
+            "application/json; charset=utf-8",
+
+        "Cache-Control":
+            "no-store"
     });
 
-    res.end(JSON.stringify(data));
+    res.end(
+        JSON.stringify(data)
+    );
 }
 
 function redirect(res, url) {
@@ -78,7 +94,8 @@ function redirect(res, url) {
 
     res.writeHead(302, {
         Location: url,
-        "Cache-Control": "no-store"
+        "Cache-Control":
+            "no-store"
     });
 
     res.end();
@@ -120,44 +137,64 @@ function createSessionId() {
 
 function getCookies(req) {
     const result = {};
-    const header = req.headers.cookie || "";
 
-    header.split(";").forEach((part) => {
-        const index = part.indexOf("=");
+    const header =
+        req.headers.cookie || "";
 
-        if (index === -1) return;
+    header
+        .split(";")
+        .forEach((part) => {
 
-        const key =
-            part.slice(0, index).trim();
+            const index =
+                part.indexOf("=");
 
-        const value =
-            part.slice(index + 1).trim();
+            if (index === -1)
+                return;
 
-        try {
-            result[key] =
-                decodeURIComponent(value);
-        } catch {
-            result[key] = value;
-        }
-    });
+            const key =
+                part
+                    .slice(0, index)
+                    .trim();
+
+            const value =
+                part
+                    .slice(index + 1)
+                    .trim();
+
+            try {
+                result[key] =
+                    decodeURIComponent(
+                        value
+                    );
+            } catch {
+                result[key] =
+                    value;
+            }
+        });
 
     return result;
 }
 
 function getSession(req) {
-    const cookies = getCookies(req);
+    const cookies =
+        getCookies(req);
 
-    const id = cookies.nextrade_session;
+    const id =
+        cookies.nextrade_session;
 
-    if (!id) return null;
+    if (!id)
+        return null;
 
-    const session = sessions.get(id);
+    const session =
+        sessions.get(id);
 
-    if (!session) return null;
+    if (!session)
+        return null;
 
     if (
         session.expiresAt &&
-        Date.now() > session.expiresAt
+        Date.now() >
+            session.expiresAt
     ) {
         sessions.delete(id);
         return null;
@@ -172,11 +209,17 @@ function getSession(req) {
 /*
  * FIXED SESSION COOKIE
  */
-function setSessionCookie(res, sessionId) {
+function setSessionCookie(
+    res,
+    sessionId
+) {
     res.setHeader(
         "Set-Cookie",
         [
-            `nextrade_session=${encodeURIComponent(sessionId)}`,
+            `nextrade_session=${encodeURIComponent(
+                sessionId
+            )}`,
+
             "HttpOnly",
             "Secure",
             "SameSite=None",
@@ -201,33 +244,67 @@ function clearSessionCookie(res) {
 }
 
 /* ==================================================
-   DERIV PUBLIC MARKET DATA
+   PUBLIC DERIV MARKET DATA
 ================================================== */
 
 function broadcast(data) {
-    const message = JSON.stringify(data);
+    const message =
+        JSON.stringify(data);
 
-    for (const client of clients) {
+    for (
+        const client of clients
+    ) {
+
         if (
             client.readyState ===
             WebSocket.OPEN
         ) {
+
             try {
-                client.send(message);
+                client.send(
+                    message
+                );
             } catch {}
         }
     }
 }
 
 function connectDeriv() {
+
     if (derivSocket) {
         try {
             derivSocket.close();
         } catch {}
     }
 
+    if (!DERIV_CLIENT_ID) {
+
+        console.error(
+            "DERIV_CLIENT_ID is missing. Cannot connect to Deriv."
+        );
+
+        derivConnected = false;
+
+        broadcast({
+            type: "status",
+            connected: false
+        });
+
+        setTimeout(
+            connectDeriv,
+            10000
+        );
+
+        return;
+    }
+
     console.log(
         "Connecting to Deriv public market data..."
+    );
+
+    console.log(
+        "Using Deriv App ID:",
+        DERIV_CLIENT_ID
     );
 
     derivSocket =
@@ -238,7 +315,9 @@ function connectDeriv() {
     derivSocket.on(
         "open",
         () => {
-            derivConnected = true;
+
+            derivConnected =
+                true;
 
             console.log(
                 "Deriv public WebSocket connected"
@@ -249,15 +328,35 @@ function connectDeriv() {
                 connected: true
             });
 
-            for (const symbol of SYMBOLS) {
+            /*
+             * Subscribe to all 10 markets.
+             */
+
+            for (
+                const symbol of SYMBOLS
+            ) {
+
                 try {
+
                     derivSocket.send(
                         JSON.stringify({
-                            ticks: symbol,
-                            subscribe: 1
+                            ticks:
+                                symbol,
+
+                            subscribe:
+                                1
                         })
                     );
-                } catch {}
+
+                } catch (
+                    error
+                ) {
+
+                    console.error(
+                        "Subscription error:",
+                        error.message
+                    );
+                }
             }
         }
     );
@@ -265,26 +364,38 @@ function connectDeriv() {
     derivSocket.on(
         "message",
         (raw) => {
+
             try {
+
                 const data =
                     JSON.parse(
                         raw.toString()
                     );
 
+                /*
+                 * Tick
+                 */
+
                 if (
-                    data.msg_type === "tick" &&
+                    data.msg_type ===
+                        "tick" &&
                     data.tick
                 ) {
+
+                    const price =
+                        Number(
+                            data.tick.quote
+                        );
+
                     broadcast({
-                        type: "tick",
+                        type:
+                            "tick",
+
                         data: {
                             symbol:
                                 data.tick.symbol,
 
-                            price:
-                                Number(
-                                    data.tick.quote
-                                ),
+                            price,
 
                             epoch:
                                 data.tick.epoch
@@ -292,18 +403,30 @@ function connectDeriv() {
                     });
                 }
 
+                /*
+                 * Deriv error
+                 */
+
                 if (data.error) {
+
                     console.error(
                         "Deriv public error:",
                         data.error
                     );
 
                     broadcast({
-                        type: "deriv_error",
-                        error: data.error
+                        type:
+                            "deriv_error",
+
+                        error:
+                            data.error
                     });
                 }
-            } catch (error) {
+
+            } catch (
+                error
+            ) {
+
                 console.error(
                     "Deriv message error:",
                     error.message
@@ -315,15 +438,20 @@ function connectDeriv() {
     derivSocket.on(
         "close",
         () => {
-            derivConnected = false;
+
+            derivConnected =
+                false;
 
             console.log(
                 "Deriv public WebSocket closed"
             );
 
             broadcast({
-                type: "status",
-                connected: false
+                type:
+                    "status",
+
+                connected:
+                    false
             });
 
             setTimeout(
@@ -336,7 +464,9 @@ function connectDeriv() {
     derivSocket.on(
         "error",
         (error) => {
-            derivConnected = false;
+
+            derivConnected =
+                false;
 
             console.error(
                 "Deriv public WebSocket error:",
@@ -347,12 +477,15 @@ function connectDeriv() {
 }
 
 /* ==================================================
-   SERVER
+   HTTP SERVER
 ================================================== */
 
 const server =
     http.createServer(
-        async (req, res) => {
+        async (
+            req,
+            res
+        ) => {
 
             setCors(res);
 
@@ -368,188 +501,277 @@ const server =
             const pathname =
                 parsed.pathname;
 
-            /* OPTIONS */
+            /*
+             * OPTIONS
+             */
 
             if (
                 req.method ===
                 "OPTIONS"
             ) {
-                res.writeHead(204);
+
+                res.writeHead(
+                    204
+                );
+
                 res.end();
+
                 return;
             }
 
-            /* ROOT */
+            /*
+             * ROOT
+             */
 
             if (
-                req.method === "GET" &&
+                req.method ===
+                    "GET" &&
                 pathname === "/"
             ) {
-                sendJson(res, 200, {
-                    service:
-                        "NEXTRADE Backend",
 
-                    status:
-                        "online",
+                sendJson(
+                    res,
+                    200,
+                    {
+                        service:
+                            "NEXTRADE Backend",
 
-                    backend:
-                        BACKEND_URL,
+                        status:
+                            "online",
 
-                    frontend:
-                        FRONTEND_URL,
+                        backend:
+                            BACKEND_URL,
 
-                    derivConnected,
+                        frontend:
+                            FRONTEND_URL,
 
-                    oauthConfigured:
-                        Boolean(
-                            DERIV_CLIENT_ID
-                        ),
+                        derivConnected,
 
-                    markets:
-                        SYMBOLS.length,
+                        oauthConfigured:
+                            Boolean(
+                                DERIV_CLIENT_ID
+                            ),
 
-                    websocket:
-                        "available"
-                });
+                        markets:
+                            SYMBOLS.length,
 
-                return;
-            }
-
-            /* HEALTH */
-
-            if (
-                req.method === "GET" &&
-                pathname === "/health"
-            ) {
-                sendJson(res, 200, {
-                    status: "ok",
-
-                    derivConnected,
-
-                    oauthConfigured:
-                        Boolean(
-                            DERIV_CLIENT_ID
-                        ),
-
-                    markets:
-                        SYMBOLS.length,
-
-                    timestamp:
-                        Date.now()
-                });
+                        websocket:
+                            "available"
+                    }
+                );
 
                 return;
             }
 
-            /* STATUS */
+            /*
+             * HEALTH
+             */
 
             if (
-                req.method === "GET" &&
-                pathname === "/api/status"
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/health"
             ) {
-                sendJson(res, 200, {
-                    success: true,
 
-                    backend:
-                        "online",
+                sendJson(
+                    res,
+                    200,
+                    {
+                        status:
+                            "ok",
 
-                    derivConnected,
+                        derivConnected,
 
-                    oauthConfigured:
-                        Boolean(
-                            DERIV_CLIENT_ID
-                        ),
+                        oauthConfigured:
+                            Boolean(
+                                DERIV_CLIENT_ID
+                            ),
 
-                    symbols:
-                        SYMBOLS
-                });
+                        markets:
+                            SYMBOLS.length,
+
+                        timestamp:
+                            Date.now()
+                    }
+                );
 
                 return;
             }
 
-            /* SESSION */
+            /*
+             * STATUS
+             */
 
             if (
-                req.method === "GET" &&
-                pathname === "/api/session"
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/api/status"
             ) {
+
+                sendJson(
+                    res,
+                    200,
+                    {
+                        success:
+                            true,
+
+                        backend:
+                            "online",
+
+                        derivConnected,
+
+                        oauthConfigured:
+                            Boolean(
+                                DERIV_CLIENT_ID
+                            ),
+
+                        symbols:
+                            SYMBOLS
+                    }
+                );
+
+                return;
+            }
+
+            /*
+             * SESSION
+             */
+
+            if (
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/api/session"
+            ) {
+
                 const session =
                     getSession(req);
 
-                sendJson(res, 200, {
-                    authenticated:
-                        Boolean(session),
+                sendJson(
+                    res,
+                    200,
+                    {
+                        authenticated:
+                            Boolean(
+                                session
+                            ),
 
-                    user:
-                        session?.data?.user ||
-                        null
-                });
+                        user:
+                            session
+                                ?.data
+                                ?.user ||
+                            null
+                    }
+                );
 
                 return;
             }
 
-            /* ACCOUNTS */
+            /*
+             * ACCOUNTS
+             */
 
             if (
-                req.method === "GET" &&
-                pathname === "/api/accounts"
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/api/accounts"
             ) {
+
                 const session =
                     getSession(req);
 
                 if (!session) {
-                    sendJson(res, 401, {
-                        success: false,
-                        error:
-                            "Not authenticated"
-                    });
+
+                    sendJson(
+                        res,
+                        401,
+                        {
+                            success:
+                                false,
+
+                            error:
+                                "Not authenticated"
+                        }
+                    );
 
                     return;
                 }
 
-                sendJson(res, 200, {
-                    success: true,
+                sendJson(
+                    res,
+                    200,
+                    {
+                        success:
+                            true,
 
-                    accounts:
-                        session.data.accounts ||
-                        []
-                });
-
-                return;
-            }
-
-            /* OAUTH STATUS */
-
-            if (
-                req.method === "GET" &&
-                pathname === "/oauth/status"
-            ) {
-                sendJson(res, 200, {
-                    oauthConfigured:
-                        Boolean(
-                            DERIV_CLIENT_ID
-                        ),
-
-                    redirectUri:
-                        DERIV_REDIRECT_URI
-                });
+                        accounts:
+                            session
+                                .data
+                                .accounts ||
+                            []
+                    }
+                );
 
                 return;
             }
 
-            /* OAUTH AUTHORIZE */
+            /*
+             * OAUTH STATUS
+             */
 
             if (
-                req.method === "GET" &&
-                pathname === "/oauth/authorize"
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/oauth/status"
             ) {
 
-                if (!DERIV_CLIENT_ID) {
-                    sendJson(res, 500, {
-                        success: false,
-                        error:
-                            "DERIV_CLIENT_ID is not configured."
-                    });
+                sendJson(
+                    res,
+                    200,
+                    {
+                        oauthConfigured:
+                            Boolean(
+                                DERIV_CLIENT_ID
+                            ),
+
+                        redirectUri:
+                            DERIV_REDIRECT_URI
+                    }
+                );
+
+                return;
+            }
+
+            /*
+             * OAUTH AUTHORIZE
+             */
+
+            if (
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/oauth/authorize"
+            ) {
+
+                if (
+                    !DERIV_CLIENT_ID
+                ) {
+
+                    sendJson(
+                        res,
+                        500,
+                        {
+                            success:
+                                false,
+
+                            error:
+                                "DERIV_CLIENT_ID is not configured."
+                        }
+                    );
 
                     return;
                 }
@@ -569,6 +791,7 @@ const server =
                     state,
                     {
                         verifier,
+
                         createdAt:
                             Date.now()
                     }
@@ -633,11 +856,15 @@ const server =
                 return;
             }
 
-            /* OAUTH CALLBACK */
+            /*
+             * OAUTH CALLBACK
+             */
 
             if (
-                req.method === "GET" &&
-                pathname === "/oauth/callback"
+                req.method ===
+                    "GET" &&
+                pathname ===
+                    "/oauth/callback"
             ) {
 
                 const code =
@@ -656,6 +883,7 @@ const server =
                     );
 
                 if (error) {
+
                     console.error(
                         "Deriv OAuth error:",
                         error
@@ -674,13 +902,22 @@ const server =
                     return;
                 }
 
-                if (!code || !state) {
-                    sendJson(res, 400, {
-                        success: false,
+                if (
+                    !code ||
+                    !state
+                ) {
 
-                        error:
-                            "Missing OAuth code or state."
-                    });
+                    sendJson(
+                        res,
+                        400,
+                        {
+                            success:
+                                false,
+
+                            error:
+                                "Missing OAuth code or state."
+                        }
+                    );
 
                     return;
                 }
@@ -691,12 +928,18 @@ const server =
                     );
 
                 if (!oauth) {
-                    sendJson(res, 400, {
-                        success: false,
 
-                        error:
-                            "Invalid or expired OAuth state."
-                    });
+                    sendJson(
+                        res,
+                        400,
+                        {
+                            success:
+                                false,
+
+                            error:
+                                "Invalid or expired OAuth state."
+                        }
+                    );
 
                     return;
                 }
@@ -707,11 +950,17 @@ const server =
 
                 try {
 
+                    /*
+                     * Exchange OAuth code
+                     * for access token.
+                     */
+
                     const tokenResponse =
                         await fetch(
                             "https://auth.deriv.com/oauth2/token",
                             {
-                                method: "POST",
+                                method:
+                                    "POST",
 
                                 headers: {
                                     "Content-Type":
@@ -743,11 +992,14 @@ const server =
                     let tokenData;
 
                     try {
+
                         tokenData =
                             JSON.parse(
                                 tokenText
                             );
+
                     } catch {
+
                         tokenData = {
                             raw:
                                 tokenText
@@ -777,7 +1029,10 @@ const server =
                     const accessToken =
                         tokenData.access_token;
 
-                    if (!accessToken) {
+                    if (
+                        !accessToken
+                    ) {
+
                         redirect(
                             res,
                             frontend(
@@ -789,7 +1044,7 @@ const server =
                     }
 
                     /*
-                     * Get Deriv account information
+                     * Get Deriv account.
                      */
 
                     let accounts = [];
@@ -803,15 +1058,21 @@ const server =
 
                         accounts =
                             await new Promise(
-                                (resolve) => {
+                                (
+                                    resolve
+                                ) => {
 
                                     let finished =
                                         false;
 
                                     const finish =
-                                        (value) => {
+                                        (
+                                            value
+                                        ) => {
 
-                                            if (finished)
+                                            if (
+                                                finished
+                                            )
                                                 return;
 
                                             finished =
@@ -829,7 +1090,9 @@ const server =
                                     const timer =
                                         setTimeout(
                                             () => {
-                                                finish([]);
+                                                finish(
+                                                    []
+                                                );
                                             },
                                             10000
                                         );
@@ -849,7 +1112,9 @@ const server =
 
                                     ws.on(
                                         "message",
-                                        (raw) => {
+                                        (
+                                            raw
+                                        ) => {
 
                                             try {
 
@@ -871,7 +1136,10 @@ const server =
                                                         data.error
                                                     );
 
-                                                    finish([]);
+                                                    finish(
+                                                        []
+                                                    );
+
                                                     return;
                                                 }
 
@@ -884,28 +1152,43 @@ const server =
                                                         timer
                                                     );
 
-                                                    finish([
-                                                        {
-                                                            loginid:
-                                                                data.authorize?.loginid,
+                                                    finish(
+                                                        [
+                                                            {
+                                                                loginid:
+                                                                    data
+                                                                        .authorize
+                                                                        ?.loginid,
 
-                                                            fullname:
-                                                                data.authorize?.fullname,
+                                                                fullname:
+                                                                    data
+                                                                        .authorize
+                                                                        ?.fullname,
 
-                                                            currency:
-                                                                data.authorize?.currency,
+                                                                currency:
+                                                                    data
+                                                                        .authorize
+                                                                        ?.currency,
 
-                                                            balance:
-                                                                data.authorize?.balance,
+                                                                balance:
+                                                                    data
+                                                                        .authorize
+                                                                        ?.balance,
 
-                                                            email:
-                                                                data.authorize?.email
-                                                        }
-                                                    ]);
+                                                                email:
+                                                                    data
+                                                                        .authorize
+                                                                        ?.email
+                                                            }
+                                                        ]
+                                                    );
                                                 }
 
                                             } catch {
-                                                finish([]);
+
+                                                finish(
+                                                    []
+                                                );
                                             }
                                         }
                                     );
@@ -918,7 +1201,9 @@ const server =
                                                 timer
                                             );
 
-                                            finish([]);
+                                            finish(
+                                                []
+                                            );
                                         }
                                     );
 
@@ -930,24 +1215,29 @@ const server =
                                                 timer
                                             );
 
-                                            finish([]);
+                                            finish(
+                                                []
+                                            );
                                         }
                                     );
                                 }
                             );
 
-                    } catch (error) {
+                    } catch (
+                        error
+                    ) {
 
                         console.error(
                             "Account lookup failed:",
                             error.message
                         );
 
-                        accounts = [];
+                        accounts =
+                            [];
                     }
 
                     /*
-                     * Create session
+                     * Create session.
                      */
 
                     const sessionId =
@@ -978,7 +1268,7 @@ const server =
                     );
 
                     /*
-                     * FIXED COOKIE
+                     * Correct cookie.
                      */
 
                     setSessionCookie(
@@ -994,10 +1284,6 @@ const server =
                         "Session created."
                     );
 
-                    console.log(
-                        "Redirecting to markets."
-                    );
-
                     redirect(
                         res,
                         frontend(
@@ -1007,7 +1293,9 @@ const server =
 
                     return;
 
-                } catch (error) {
+                } catch (
+                    error
+                ) {
 
                     console.error(
                         "OAuth callback error:",
@@ -1025,38 +1313,61 @@ const server =
                 }
             }
 
-            /* LOGOUT */
+            /*
+             * LOGOUT
+             */
 
             if (
-                req.method === "POST" &&
-                pathname === "/api/logout"
+                req.method ===
+                    "POST" &&
+                pathname ===
+                    "/api/logout"
             ) {
 
                 const session =
                     getSession(req);
 
                 if (session) {
+
                     sessions.delete(
                         session.id
                     );
                 }
 
-                clearSessionCookie(res);
+                clearSessionCookie(
+                    res
+                );
 
-                sendJson(res, 200, {
-                    success: true
-                });
+                sendJson(
+                    res,
+                    200,
+                    {
+                        success:
+                            true
+                    }
+                );
 
                 return;
             }
 
-            /* NOT FOUND */
+            /*
+             * NOT FOUND
+             */
 
-            sendJson(res, 404, {
-                success: false,
-                error: "Not found",
-                path: pathname
-            });
+            sendJson(
+                res,
+                404,
+                {
+                    success:
+                        false,
+
+                    error:
+                        "Not found",
+
+                    path:
+                        pathname
+                }
+            );
         }
     );
 
@@ -1073,11 +1384,15 @@ websocketServer.on(
     "connection",
     (client) => {
 
-        clients.add(client);
+        clients.add(
+            client
+        );
 
         client.send(
             JSON.stringify({
-                type: "status",
+                type:
+                    "status",
+
                 connected:
                     derivConnected
             })
@@ -1086,21 +1401,25 @@ websocketServer.on(
         client.on(
             "close",
             () => {
-                clients.delete(client);
+                clients.delete(
+                    client
+                );
             }
         );
 
         client.on(
             "error",
             () => {
-                clients.delete(client);
+                clients.delete(
+                    client
+                );
             }
         );
     }
 );
 
 /* ==================================================
-   START SERVER
+   START
 ================================================== */
 
 server.listen(
@@ -1159,9 +1478,14 @@ server.listen(
     }
 );
 
+/* ==================================================
+   ERROR HANDLERS
+================================================== */
+
 process.on(
     "uncaughtException",
     (error) => {
+
         console.error(
             "UNCAUGHT EXCEPTION:",
             error
@@ -1172,6 +1496,7 @@ process.on(
 process.on(
     "unhandledRejection",
     (error) => {
+
         console.error(
             "UNHANDLED REJECTION:",
             error
