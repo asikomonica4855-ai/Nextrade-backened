@@ -8,8 +8,12 @@ const DERIV_CLIENT_ID = process.env.DERIV_CLIENT_ID;
 
 const BACKEND_URL = "https://nextrade-backened.onrender.com";
 const FRONTEND_URL = "https://asikomonica4855-ai.github.io/Nextrade";
+
 const DERIV_REDIRECT_URI =
 "https://nextrade-backened.onrender.com/oauth/callback";
+
+const DERIV_WS_URL =
+"wss://ws.derivws.com/websockets/v3";
 
 const SYMBOLS = [
 "1HZ100V",
@@ -24,8 +28,6 @@ const SYMBOLS = [
 "R_10"
 ];
 
-const DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3";
-
 let derivSocket = null;
 let derivConnected = false;
 
@@ -34,13 +36,18 @@ const oauthStates = new Map();
 const sessions = new Map();
 
 /* ==================================================
-BASIC HELPERS
+HELPERS
 ================================================== */
 
 function setCors(res) {
 res.setHeader(
 "Access-Control-Allow-Origin",
 FRONTEND_URL
+);
+
+res.setHeader(
+"Access-Control-Allow-Credentials",
+"true"
 );
 
 res.setHeader(
@@ -51,11 +58,6 @@ res.setHeader(
 res.setHeader(
 "Access-Control-Allow-Headers",
 "Content-Type, Authorization"
-);
-
-res.setHeader(
-"Access-Control-Allow-Credentials",
-"true"
 );
 }
 
@@ -81,22 +83,29 @@ Location: url,
 res.end();
 }
 
-/* ==================================================
-CRYPTO / PKCE
-================================================== */
+/*
+
+* IMPORTANT:
+* Always construct the frontend URL explicitly.
+  */
+  function frontend(path) {
+  return FRONTEND_URL + path;
+  }
 
 function createState() {
-return crypto.randomBytes(32).toString("hex");
+return crypto
+.randomBytes(32)
+.toString("hex");
 }
 
-function createCodeVerifier() {
+function createVerifier() {
 return crypto
 .randomBytes(64)
 .toString("base64url")
 .slice(0, 128);
 }
 
-function createCodeChallenge(verifier) {
+function createChallenge(verifier) {
 return crypto
 .createHash("sha256")
 .update(verifier)
@@ -104,15 +113,17 @@ return crypto
 }
 
 function createSessionId() {
-return crypto.randomBytes(48).toString("base64url");
+return crypto
+.randomBytes(48)
+.toString("base64url");
 }
 
 /* ==================================================
-COOKIES
+COOKIES / SESSIONS
 ================================================== */
 
 function getCookies(req) {
-const cookies = {};
+const result = {};
 const header = req.headers.cookie || "";
 
 header.split(";").forEach((part) => {
@@ -120,33 +131,41 @@ const index = part.indexOf("=");
 
 if (index === -1) return;
 
-const key = part.slice(0, index).trim();
-const value = part.slice(index + 1).trim();
+const key =
+  part.slice(0, index).trim();
+
+const value =
+  part.slice(index + 1).trim();
 
 try {
-  cookies[key] = decodeURIComponent(value);
+  result[key] =
+    decodeURIComponent(value);
 } catch {
-  cookies[key] = value;
+  result[key] = value;
 }
 
 });
 
-return cookies;
+return result;
 }
 
 function getSession(req) {
-const cookies = getCookies(req);
-const id = cookies.nextrade_session;
+const cookies =
+getCookies(req);
+
+const id =
+cookies.nextrade_session;
 
 if (!id) return null;
 
-const session = sessions.get(id);
+const session =
+sessions.get(id);
 
 if (!session) return null;
 
 if (
 session.expiresAt &&
-Date.now() >= session.expiresAt
+Date.now() > session.expiresAt
 ) {
 sessions.delete(id);
 return null;
@@ -158,11 +177,14 @@ data: session
 };
 }
 
-function setSessionCookie(res, sessionId) {
+function setSessionCookie(
+res,
+sessionId
+) {
 res.setHeader(
 "Set-Cookie",
 [
-"nextrade_session=${encodeURIComponent(sessionId)}",
+"nextrade_session=${encodeURIComponent( sessionId )}",
 "HttpOnly",
 "Secure",
 "SameSite=None",
@@ -187,50 +209,20 @@ res.setHeader(
 }
 
 /* ==================================================
-SAFE FRONTEND REDIRECT
-================================================== */
-
-function frontend(path) {
-return "${FRONTEND_URL}${path}";
-}
-
-/* ==================================================
-CLEANUP
-================================================== */
-
-setInterval(() => {
-const now = Date.now();
-
-for (const [state, item] of oauthStates.entries()) {
-if (
-now - item.createdAt >
-10 * 60 * 1000
-) {
-oauthStates.delete(state);
-}
-}
-
-for (const [id, session] of sessions.entries()) {
-if (
-session.expiresAt &&
-now >= session.expiresAt
-) {
-sessions.delete(id);
-}
-}
-}, 5 * 60 * 1000);
-
-/* ==================================================
 DERIV PUBLIC MARKET DATA
 ================================================== */
 
-function broadcast(message) {
-const text = JSON.stringify(message);
+function broadcast(data) {
+const message =
+JSON.stringify(data);
 
 for (const client of clients) {
-if (client.readyState === WebSocket.OPEN) {
+if (
+client.readyState ===
+WebSocket.OPEN
+) {
 try {
-client.send(text);
+client.send(message);
 } catch {}
 }
 }
@@ -243,752 +235,842 @@ derivSocket.close();
 } catch {}
 }
 
-console.log("Connecting to Deriv public market data...");
+console.log(
+"Connecting to Deriv public market data..."
+);
 
-derivSocket = new WebSocket(
+derivSocket =
+new WebSocket(
 DERIV_WS_URL
 );
 
-derivSocket.on("open", () => {
+derivSocket.on(
+"open",
+() => {
 derivConnected = true;
 
-console.log(
-  "Deriv public WebSocket connected"
-);
+  console.log(
+    "Deriv public WebSocket connected"
+  );
 
-broadcast({
-  type: "status",
-  connected: true
-});
+  broadcast({
+    type: "status",
+    connected: true
+  });
 
-for (const symbol of SYMBOLS) {
-  try {
-    derivSocket.send(
-      JSON.stringify({
-        ticks: symbol,
-        subscribe: 1
-      })
-    );
-  } catch {}
+  for (const symbol of SYMBOLS) {
+    try {
+      derivSocket.send(
+        JSON.stringify({
+          ticks: symbol,
+          subscribe: 1
+        })
+      );
+    } catch {}
+  }
 }
 
-});
+);
 
-derivSocket.on("message", (raw) => {
+derivSocket.on(
+"message",
+(raw) => {
 try {
-const message =
-JSON.parse(raw.toString());
+const data =
+JSON.parse(
+raw.toString()
+);
 
-  if (
-    message.msg_type === "tick" &&
-    message.tick
-  ) {
-    const tick = message.tick;
+    if (
+      data.msg_type === "tick" &&
+      data.tick
+    ) {
+      broadcast({
+        type: "tick",
+        data: {
+          symbol:
+            data.tick.symbol,
 
-    broadcast({
-      type: "tick",
-      data: {
-        symbol: tick.symbol,
-        price: Number(tick.quote),
-        epoch: tick.epoch
-      }
-    });
-  }
+          price:
+            Number(
+              data.tick.quote
+            ),
 
-  if (message.error) {
+          epoch:
+            data.tick.epoch
+        }
+      });
+    }
+
+    if (data.error) {
+      console.error(
+        "Deriv public error:",
+        data.error
+      );
+
+      broadcast({
+        type: "deriv_error",
+        error: data.error
+      });
+    }
+  } catch (error) {
     console.error(
-      "Deriv public error:",
-      message.error
+      "Deriv message error:",
+      error.message
     );
-
-    broadcast({
-      type: "deriv_error",
-      error: message.error
-    });
   }
-} catch (error) {
+}
+
+);
+
+derivSocket.on(
+"close",
+() => {
+derivConnected = false;
+
+  console.log(
+    "Deriv public WebSocket closed"
+  );
+
+  broadcast({
+    type: "status",
+    connected: false
+  });
+
+  setTimeout(
+    connectDeriv,
+    5000
+  );
+}
+
+);
+
+derivSocket.on(
+"error",
+(error) => {
+derivConnected = false;
+
   console.error(
-    "Deriv message error:",
+    "Deriv public WebSocket error:",
     error.message
   );
 }
 
-});
-
-derivSocket.on("close", () => {
-derivConnected = false;
-
-console.log(
-  "Deriv public WebSocket closed"
 );
-
-broadcast({
-  type: "status",
-  connected: false
-});
-
-setTimeout(
-  connectDeriv,
-  5000
-);
-
-});
-
-derivSocket.on("error", (error) => {
-derivConnected = false;
-
-console.error(
-  "Deriv public WebSocket error:",
-  error.message
-);
-
-});
 }
 
 /* ==================================================
-HTTP SERVER
+SERVER
 ================================================== */
 
-const server = http.createServer(
+const server =
+http.createServer(
 async (req, res) => {
 setCors(res);
 
-const parsed = new URL(
-  req.url,
-  `http://${req.headers.host || "localhost"}`
-);
+  const parsed =
+    new URL(
+      req.url,
+      `http://${
+        req.headers.host ||
+        "localhost"
+      }`
+    );
 
-const pathname = parsed.pathname;
+  const pathname =
+    parsed.pathname;
 
-/* ----------------------------------------------
-   OPTIONS
----------------------------------------------- */
+  /* --------------------------------------------
+     OPTIONS
+  -------------------------------------------- */
 
-if (req.method === "OPTIONS") {
-  res.writeHead(204);
-  res.end();
-  return;
-}
+  if (
+    req.method ===
+    "OPTIONS"
+  ) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
-/* ----------------------------------------------
-   ROOT
----------------------------------------------- */
+  /* --------------------------------------------
+     ROOT
+  -------------------------------------------- */
 
-if (
-  req.method === "GET" &&
-  pathname === "/"
-) {
-  sendJson(res, 200, {
-    service: "NEXTRADE Backend",
-    status: "online",
-    backend: BACKEND_URL,
-    frontend: FRONTEND_URL,
-    derivConnected,
-    oauthConfigured:
-      Boolean(DERIV_CLIENT_ID),
-    markets: SYMBOLS.length,
-    websocket: "available"
-  });
+  if (
+    req.method === "GET" &&
+    pathname === "/"
+  ) {
+    sendJson(res, 200, {
+      service:
+        "NEXTRADE Backend",
 
-  return;
-}
+      status:
+        "online",
 
-/* ----------------------------------------------
-   HEALTH
----------------------------------------------- */
+      backend:
+        BACKEND_URL,
 
-if (
-  req.method === "GET" &&
-  pathname === "/health"
-) {
-  sendJson(res, 200, {
-    status: "ok",
-    derivConnected,
-    oauthConfigured:
-      Boolean(DERIV_CLIENT_ID),
-    markets: SYMBOLS.length,
-    timestamp: Date.now()
-  });
+      frontend:
+        FRONTEND_URL,
 
-  return;
-}
+      derivConnected,
 
-/* ----------------------------------------------
-   API STATUS
----------------------------------------------- */
+      oauthConfigured:
+        Boolean(
+          DERIV_CLIENT_ID
+        ),
 
-if (
-  req.method === "GET" &&
-  pathname === "/api/status"
-) {
-  sendJson(res, 200, {
-    success: true,
-    backend: "online",
-    derivConnected,
-    oauthConfigured:
-      Boolean(DERIV_CLIENT_ID),
-    symbols: SYMBOLS
-  });
+      markets:
+        SYMBOLS.length,
 
-  return;
-}
-
-/* ----------------------------------------------
-   SESSION
----------------------------------------------- */
-
-if (
-  req.method === "GET" &&
-  pathname === "/api/session"
-) {
-  const session =
-    getSession(req);
-
-  sendJson(res, 200, {
-    authenticated:
-      Boolean(session),
-    user:
-      session?.data?.user || null
-  });
-
-  return;
-}
-
-/* ----------------------------------------------
-   ACCOUNT INFORMATION
----------------------------------------------- */
-
-if (
-  req.method === "GET" &&
-  pathname === "/api/accounts"
-) {
-  const session =
-    getSession(req);
-
-  if (!session) {
-    sendJson(res, 401, {
-      success: false,
-      error: "Not authenticated"
+      websocket:
+        "available"
     });
 
     return;
   }
 
-  if (!session.data.accounts) {
+  /* --------------------------------------------
+     HEALTH
+  -------------------------------------------- */
+
+  if (
+    req.method === "GET" &&
+    pathname === "/health"
+  ) {
+    sendJson(res, 200, {
+      status: "ok",
+
+      derivConnected,
+
+      oauthConfigured:
+        Boolean(
+          DERIV_CLIENT_ID
+        ),
+
+      markets:
+        SYMBOLS.length,
+
+      timestamp:
+        Date.now()
+    });
+
+    return;
+  }
+
+  /* --------------------------------------------
+     STATUS
+  -------------------------------------------- */
+
+  if (
+    req.method === "GET" &&
+    pathname === "/api/status"
+  ) {
     sendJson(res, 200, {
       success: true,
-      accounts: []
+
+      backend:
+        "online",
+
+      derivConnected,
+
+      oauthConfigured:
+        Boolean(
+          DERIV_CLIENT_ID
+        ),
+
+      symbols:
+        SYMBOLS
     });
 
     return;
   }
 
-  sendJson(res, 200, {
-    success: true,
-    accounts:
-      session.data.accounts
-  });
+  /* --------------------------------------------
+     SESSION
+  -------------------------------------------- */
 
-  return;
-}
+  if (
+    req.method === "GET" &&
+    pathname === "/api/session"
+  ) {
+    const session =
+      getSession(req);
 
-/* ----------------------------------------------
-   OAUTH STATUS
----------------------------------------------- */
+    sendJson(res, 200, {
+      authenticated:
+        Boolean(session),
 
-if (
-  req.method === "GET" &&
-  pathname === "/oauth/status"
-) {
-  sendJson(res, 200, {
-    oauthConfigured:
-      Boolean(DERIV_CLIENT_ID),
-
-    clientIdConfigured:
-      Boolean(DERIV_CLIENT_ID),
-
-    redirectUri:
-      DERIV_REDIRECT_URI
-  });
-
-  return;
-}
-
-/* ----------------------------------------------
-   START OAUTH
----------------------------------------------- */
-
-if (
-  req.method === "GET" &&
-  pathname === "/oauth/authorize"
-) {
-  if (!DERIV_CLIENT_ID) {
-    sendJson(res, 500, {
-      success: false,
-      error:
-        "DERIV_CLIENT_ID is not configured in Render."
+      user:
+        session?.data?.user ||
+        null
     });
 
     return;
   }
 
-  const verifier =
-    createCodeVerifier();
+  /* --------------------------------------------
+     ACCOUNTS
+  -------------------------------------------- */
 
-  const challenge =
-    createCodeChallenge(
-      verifier
-    );
+  if (
+    req.method === "GET" &&
+    pathname === "/api/accounts"
+  ) {
+    const session =
+      getSession(req);
 
-  const state =
-    createState();
+    if (!session) {
+      sendJson(res, 401, {
+        success: false,
+        error:
+          "Not authenticated"
+      });
 
-  oauthStates.set(
-    state,
-    {
-      verifier,
-      createdAt: Date.now()
+      return;
     }
-  );
 
-  /*
-   * IMPORTANT:
-   * The callback is deliberately fixed
-   * to the Render backend.
-   *
-   * It is NOT the GitHub callback.
-   */
+    sendJson(res, 200, {
+      success: true,
 
-  const params =
-    new URLSearchParams({
-      response_type: "code",
-      client_id:
-        DERIV_CLIENT_ID,
-      redirect_uri:
-        DERIV_REDIRECT_URI,
-      scope: "trade",
+      accounts:
+        session.data.accounts ||
+        []
+    });
+
+    return;
+  }
+
+  /* --------------------------------------------
+     OAUTH STATUS
+  -------------------------------------------- */
+
+  if (
+    req.method === "GET" &&
+    pathname === "/oauth/status"
+  ) {
+    sendJson(res, 200, {
+      oauthConfigured:
+        Boolean(
+          DERIV_CLIENT_ID
+        ),
+
+      redirectUri:
+        DERIV_REDIRECT_URI
+    });
+
+    return;
+  }
+
+  /* --------------------------------------------
+     OAUTH AUTHORIZE
+  -------------------------------------------- */
+
+  if (
+    req.method === "GET" &&
+    pathname === "/oauth/authorize"
+  ) {
+    if (!DERIV_CLIENT_ID) {
+      sendJson(res, 500, {
+        success: false,
+        error:
+          "DERIV_CLIENT_ID is not configured."
+      });
+
+      return;
+    }
+
+    const verifier =
+      createVerifier();
+
+    const challenge =
+      createChallenge(
+        verifier
+      );
+
+    const state =
+      createState();
+
+    oauthStates.set(
       state,
-      code_challenge:
-        challenge,
-      code_challenge_method:
-        "S256"
-    });
-
-  const authorizationUrl =
-    "https://auth.deriv.com/oauth2/auth?" +
-    params.toString();
-
-  console.log(
-    "Starting Deriv OAuth"
-  );
-
-  console.log(
-    "OAuth redirect:",
-    DERIV_REDIRECT_URI
-  );
-
-  redirect(
-    res,
-    authorizationUrl
-  );
-
-  return;
-}
-
-/* ----------------------------------------------
-   OAUTH CALLBACK
----------------------------------------------- */
-
-if (
-  req.method === "GET" &&
-  pathname === "/oauth/callback"
-) {
-  const code =
-    parsed.searchParams.get(
-      "code"
-    );
-
-  const state =
-    parsed.searchParams.get(
-      "state"
-    );
-
-  const error =
-    parsed.searchParams.get(
-      "error"
-    );
-
-  if (error) {
-    console.error(
-      "Deriv OAuth error:",
-      error
-    );
-
-    redirect(
-      res,
-      frontend(
-        `/login.html?oauth_error=${encodeURIComponent(
-          error
-        )}`
-      )
-    );
-
-    return;
-  }
-
-  if (!code || !state) {
-    sendJson(res, 400, {
-      success: false,
-      error:
-        "Missing OAuth code or state."
-    });
-
-    return;
-  }
-
-  const saved =
-    oauthStates.get(state);
-
-  if (!saved) {
-    sendJson(res, 400, {
-      success: false,
-      error:
-        "Invalid or expired OAuth state."
-    });
-
-    return;
-  }
-
-  oauthStates.delete(state);
-
-  try {
-    const tokenResponse =
-      await fetch(
-        "https://auth.deriv.com/oauth2/token",
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/x-www-form-urlencoded"
-          },
-
-          body:
-            new URLSearchParams({
-              grant_type:
-                "authorization_code",
-
-              client_id:
-                DERIV_CLIENT_ID,
-
-              code,
-
-              code_verifier:
-                saved.verifier,
-
-              redirect_uri:
-                DERIV_REDIRECT_URI
-            })
-        }
-      );
-
-    const tokenText =
-      await tokenResponse.text();
-
-    let tokenData;
-
-    try {
-      tokenData =
-        JSON.parse(
-          tokenText
-        );
-    } catch {
-      tokenData = {
-        raw: tokenText
-      };
-    }
-
-    if (
-      !tokenResponse.ok ||
-      tokenData.error
-    ) {
-      console.error(
-        "OAuth token exchange failed:",
-        tokenData
-      );
-
-      redirect(
-        res,
-        frontend(
-          `/login.html?oauth_error=token_exchange_failed`
-        )
-      );
-
-      return;
-    }
-
-    const accessToken =
-      tokenData.access_token;
-
-    if (!accessToken) {
-      console.error(
-        "OAuth response did not contain access token"
-      );
-
-      redirect(
-        res,
-        frontend(
-          `/login.html?oauth_error=missing_access_token`
-        )
-      );
-
-      return;
-    }
-
-    /*
-     * Get Deriv account information.
-     */
-
-    let accounts = [];
-
-    try {
-      const ws =
-        new WebSocket(
-          DERIV_WS_URL
-        );
-
-      accounts =
-        await new Promise(
-          (resolve) => {
-            let finished = false;
-
-            const finish =
-              (value) => {
-                if (finished)
-                  return;
-
-                finished = true;
-
-                try {
-                  ws.close();
-                } catch {}
-
-                resolve(
-                  value
-                );
-              };
-
-            const timer =
-              setTimeout(
-                () => {
-                  finish([]);
-                },
-                10000
-              );
-
-            ws.on(
-              "open",
-              () => {
-                ws.send(
-                  JSON.stringify({
-                    authorize:
-                      accessToken
-                  })
-                );
-              }
-            );
-
-            ws.on(
-              "message",
-              (raw) => {
-                try {
-                  const msg =
-                    JSON.parse(
-                      raw.toString()
-                    );
-
-                  if (
-                    msg.error
-                  ) {
-                    clearTimeout(
-                      timer
-                    );
-
-                    console.error(
-                      "Deriv authorize error:",
-                      msg.error
-                    );
-
-                    finish([]);
-                    return;
-                  }
-
-                  if (
-                    msg.msg_type ===
-                    "authorize"
-                  ) {
-                    clearTimeout(
-                      timer
-                    );
-
-                    finish([
-                      {
-                        loginid:
-                          msg.authorize
-                            ?.loginid,
-
-                        fullname:
-                          msg.authorize
-                            ?.fullname,
-
-                        currency:
-                          msg.authorize
-                            ?.currency,
-
-                        balance:
-                          msg.authorize
-                            ?.balance,
-
-                        email:
-                          msg.authorize
-                            ?.email
-                      }
-                    ]);
-                  }
-                } catch {
-                  finish([]);
-                }
-              }
-            );
-
-            ws.on(
-              "error",
-              () => {
-                clearTimeout(
-                  timer
-                );
-
-                finish([]);
-              }
-            );
-
-            ws.on(
-              "close",
-              () => {
-                clearTimeout(
-                  timer
-                );
-
-                finish([]);
-              }
-            );
-          }
-        );
-    } catch (error) {
-      console.error(
-        "Account lookup failed:",
-        error.message
-      );
-
-      accounts = [];
-    }
-
-    /*
-     * Create NEXTRADE session.
-     */
-
-    const sessionId =
-      createSessionId();
-
-    sessions.set(
-      sessionId,
       {
-        accessToken,
-        accounts,
-        user:
-          accounts[0] || null,
-
+        verifier,
         createdAt:
-          Date.now(),
-
-        expiresAt:
-          Date.now() +
-          7 * 24 * 60 * 60 * 1000
+          Date.now()
       }
     );
 
-    setSessionCookie(
-      res,
-      sessionId
+    const params =
+      new URLSearchParams();
+
+    params.set(
+      "response_type",
+      "code"
     );
 
-    /*
-     * Successful OAuth:
-     * go directly to markets.
-     */
+    params.set(
+      "client_id",
+      DERIV_CLIENT_ID
+    );
+
+    params.set(
+      "redirect_uri",
+      DERIV_REDIRECT_URI
+    );
+
+    params.set(
+      "scope",
+      "trade"
+    );
+
+    params.set(
+      "state",
+      state
+    );
+
+    params.set(
+      "code_challenge",
+      challenge
+    );
+
+    params.set(
+      "code_challenge_method",
+      "S256"
+    );
+
+    const authorizationUrl =
+      "https://auth.deriv.com/oauth2/auth?" +
+      params.toString();
+
+    console.log(
+      "Starting Deriv OAuth"
+    );
+
+    console.log(
+      "OAuth redirect:",
+      DERIV_REDIRECT_URI
+    );
 
     redirect(
       res,
-      frontend(
-        "/markets.html"
-      )
-    );
-
-    return;
-  } catch (error) {
-    console.error(
-      "OAuth callback error:",
-      error
-    );
-
-    redirect(
-      res,
-      frontend(
-        `/login.html?oauth_error=oauth_callback_failed`
-      )
+      authorizationUrl
     );
 
     return;
   }
-}
 
-/* ----------------------------------------------
-   LOGOUT
----------------------------------------------- */
+  /* --------------------------------------------
+     OAUTH CALLBACK
+  -------------------------------------------- */
 
-if (
-  req.method === "POST" &&
-  pathname === "/api/logout"
-) {
-  const session =
-    getSession(req);
+  if (
+    req.method === "GET" &&
+    pathname === "/oauth/callback"
+  ) {
+    const code =
+      parsed.searchParams.get(
+        "code"
+      );
 
-  if (session) {
-    sessions.delete(
-      session.id
+    const state =
+      parsed.searchParams.get(
+        "state"
+      );
+
+    const error =
+      parsed.searchParams.get(
+        "error"
+      );
+
+    if (error) {
+      console.error(
+        "Deriv OAuth error:",
+        error
+      );
+
+      redirect(
+        res,
+        frontend(
+          "/login.html?oauth_error=" +
+          encodeURIComponent(
+            error
+          )
+        )
+      );
+
+      return;
+    }
+
+    if (!code || !state) {
+      sendJson(res, 400, {
+        success: false,
+
+        error:
+          "Missing OAuth code or state."
+      });
+
+      return;
+    }
+
+    const oauth =
+      oauthStates.get(
+        state
+      );
+
+    if (!oauth) {
+      sendJson(res, 400, {
+        success: false,
+
+        error:
+          "Invalid or expired OAuth state."
+      });
+
+      return;
+    }
+
+    oauthStates.delete(
+      state
     );
+
+    try {
+      const tokenResponse =
+        await fetch(
+          "https://auth.deriv.com/oauth2/token",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/x-www-form-urlencoded"
+            },
+
+            body:
+              new URLSearchParams({
+                grant_type:
+                  "authorization_code",
+
+                client_id:
+                  DERIV_CLIENT_ID,
+
+                code,
+
+                code_verifier:
+                  oauth.verifier,
+
+                redirect_uri:
+                  DERIV_REDIRECT_URI
+              })
+          }
+        );
+
+      const tokenText =
+        await tokenResponse.text();
+
+      let tokenData;
+
+      try {
+        tokenData =
+          JSON.parse(
+            tokenText
+          );
+      } catch {
+        tokenData = {
+          raw: tokenText
+        };
+      }
+
+      if (
+        !tokenResponse.ok ||
+        tokenData.error
+      ) {
+        console.error(
+          "OAuth token error:",
+          tokenData
+        );
+
+        redirect(
+          res,
+          frontend(
+            "/login.html?oauth_error=token_exchange_failed"
+          )
+        );
+
+        return;
+      }
+
+      const accessToken =
+        tokenData.access_token;
+
+      if (!accessToken) {
+        redirect(
+          res,
+          frontend(
+            "/login.html?oauth_error=missing_access_token"
+          )
+        );
+
+        return;
+      }
+
+      /*
+       * Get account information.
+       */
+
+      let accounts = [];
+
+      try {
+        const ws =
+          new WebSocket(
+            DERIV_WS_URL
+          );
+
+        accounts =
+          await new Promise(
+            (resolve) => {
+              let finished =
+                false;
+
+              const finish =
+                (value) => {
+                  if (finished)
+                    return;
+
+                  finished =
+                    true;
+
+                  try {
+                    ws.close();
+                  } catch {}
+
+                  resolve(
+                    value
+                  );
+                };
+
+              const timer =
+                setTimeout(
+                  () => {
+                    finish([]);
+                  },
+                  10000
+                );
+
+              ws.on(
+                "open",
+                () => {
+                  ws.send(
+                    JSON.stringify({
+                      authorize:
+                        accessToken
+                    })
+                  );
+                }
+              );
+
+              ws.on(
+                "message",
+                (raw) => {
+                  try {
+                    const data =
+                      JSON.parse(
+                        raw.toString()
+                      );
+
+                    if (
+                      data.error
+                    ) {
+                      clearTimeout(
+                        timer
+                      );
+
+                      console.error(
+                        "Deriv account error:",
+                        data.error
+                      );
+
+                      finish([]);
+                      return;
+                    }
+
+                    if (
+                      data.msg_type ===
+                      "authorize"
+                    ) {
+                      clearTimeout(
+                        timer
+                      );
+
+                      finish([
+                        {
+                          loginid:
+                            data
+                              .authorize
+                              ?.loginid,
+
+                          fullname:
+                            data
+                              .authorize
+                              ?.fullname,
+
+                          currency:
+                            data
+                              .authorize
+                              ?.currency,
+
+                          balance:
+                            data
+                              .authorize
+                              ?.balance,
+
+                          email:
+                            data
+                              .authorize
+                              ?.email
+                        }
+                      ]);
+                    }
+                  } catch {
+                    finish([]);
+                  }
+                }
+              );
+
+              ws.on(
+                "error",
+                () => {
+                  clearTimeout(
+                    timer
+                  );
+
+                  finish([]);
+                }
+              );
+
+              ws.on(
+                "close",
+                () => {
+                  clearTimeout(
+                    timer
+                  );
+
+                  finish([]);
+                }
+              );
+            }
+          );
+      } catch (error) {
+        console.error(
+          "Account lookup failed:",
+          error.message
+        );
+
+        accounts = [];
+      }
+
+      /*
+       * Create session.
+       */
+
+      const sessionId =
+        createSessionId();
+
+      sessions.set(
+        sessionId,
+        {
+          accessToken,
+
+          accounts,
+
+          user:
+            accounts[0] ||
+            null,
+
+          createdAt:
+            Date.now(),
+
+          expiresAt:
+            Date.now() +
+            7 *
+              24 *
+              60 *
+              60 *
+              1000
+        }
+      );
+
+      setSessionCookie(
+        res,
+        sessionId
+      );
+
+      /*
+       * IMPORTANT:
+       * Correct frontend redirect.
+       */
+
+      redirect(
+        res,
+        frontend(
+          "/markets.html"
+        )
+      );
+
+      return;
+    } catch (error) {
+      console.error(
+        "OAuth callback error:",
+        error
+      );
+
+      redirect(
+        res,
+        frontend(
+          "/login.html?oauth_error=oauth_callback_failed"
+        )
+      );
+
+      return;
+    }
   }
 
-  clearSessionCookie(res);
+  /* --------------------------------------------
+     LOGOUT
+  -------------------------------------------- */
 
-  sendJson(res, 200, {
-    success: true
+  if (
+    req.method === "POST" &&
+    pathname === "/api/logout"
+  ) {
+    const session =
+      getSession(req);
+
+    if (session) {
+      sessions.delete(
+        session.id
+      );
+    }
+
+    clearSessionCookie(res);
+
+    sendJson(res, 200, {
+      success: true
+    });
+
+    return;
+  }
+
+  /* --------------------------------------------
+     NOT FOUND
+  -------------------------------------------- */
+
+  sendJson(res, 404, {
+    success: false,
+    error: "Not found",
+    path: pathname
   });
-
-  return;
 }
 
-/* ----------------------------------------------
-   404
----------------------------------------------- */
-
-sendJson(res, 404, {
-  success: false,
-  error: "Not found",
-  path: pathname
-});
-
-}
 );
 
 /* ==================================================
@@ -1035,7 +1117,7 @@ client.on(
 );
 
 /* ==================================================
-START
+START SERVER
 ================================================== */
 
 server.listen(
