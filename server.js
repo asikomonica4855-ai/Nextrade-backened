@@ -34,6 +34,7 @@ let derivConnected = false;
 const clients = new Set();
 const oauthStates = new Map();
 const sessions = new Map();
+const handoffs = new Map();
 
 /* ==================================================
 HELPERS
@@ -73,8 +74,6 @@ res.end(JSON.stringify(data));
 }
 
 function redirect(res, url) {
-setCors(res);
-
 res.writeHead(302, {
 Location: url,
 "Cache-Control": "no-store"
@@ -83,19 +82,12 @@ Location: url,
 res.end();
 }
 
-/*
-
-* IMPORTANT:
-* Always construct the frontend URL explicitly.
-  */
-  function frontend(path) {
-  return FRONTEND_URL + path;
-  }
+function frontend(path) {
+return FRONTEND_URL + path;
+}
 
 function createState() {
-return crypto
-.randomBytes(32)
-.toString("hex");
+return crypto.randomBytes(32).toString("hex");
 }
 
 function createVerifier() {
@@ -112,54 +104,43 @@ return crypto
 .digest("base64url");
 }
 
-function createSessionId() {
+function createRandomToken() {
 return crypto
 .randomBytes(48)
 .toString("base64url");
 }
 
 /* ==================================================
-COOKIES / SESSIONS
+AUTHORIZATION HEADER
 ================================================== */
 
-function getCookies(req) {
-const result = {};
-const header = req.headers.cookie || "";
+function getBearerToken(req) {
+const header =
+req.headers.authorization || "";
 
-header.split(";").forEach((part) => {
-const index = part.indexOf("=");
+if (!header) return null;
 
-if (index === -1) return;
+const parts =
+header.split(" ");
 
-const key =
-  part.slice(0, index).trim();
-
-const value =
-  part.slice(index + 1).trim();
-
-try {
-  result[key] =
-    decodeURIComponent(value);
-} catch {
-  result[key] = value;
+if (
+parts.length === 2 &&
+parts[0].toLowerCase() === "bearer"
+) {
+return parts[1];
 }
 
-});
-
-return result;
+return null;
 }
 
-function getSession(req) {
-const cookies =
-getCookies(req);
+function getSessionFromRequest(req) {
+const token =
+getBearerToken(req);
 
-const id =
-cookies.nextrade_session;
-
-if (!id) return null;
+if (!token) return null;
 
 const session =
-sessions.get(id);
+sessions.get(token);
 
 if (!session) return null;
 
@@ -167,45 +148,14 @@ if (
 session.expiresAt &&
 Date.now() > session.expiresAt
 ) {
-sessions.delete(id);
+sessions.delete(token);
 return null;
 }
 
 return {
-id,
+id: token,
 data: session
 };
-}
-
-function setSessionCookie(
-res,
-sessionId
-) {
-res.setHeader(
-"Set-Cookie",
-[
-"nextrade_session=${encodeURIComponent( sessionId )}",
-"HttpOnly",
-"Secure",
-"SameSite=None",
-"Path=/",
-"Max-Age=604800"
-].join("; ")
-);
-}
-
-function clearSessionCookie(res) {
-res.setHeader(
-"Set-Cookie",
-[
-"nextrade_session=",
-"HttpOnly",
-"Secure",
-"SameSite=None",
-"Path=/",
-"Max-Age=0"
-].join("; ")
-);
 }
 
 /* ==================================================
@@ -366,7 +316,8 @@ SERVER
 const server =
 http.createServer(
 async (req, res) => {
-setCors(res);
+
+  setCors(res);
 
   const parsed =
     new URL(
@@ -385,8 +336,7 @@ setCors(res);
   -------------------------------------------- */
 
   if (
-    req.method ===
-    "OPTIONS"
+    req.method === "OPTIONS"
   ) {
     res.writeHead(204);
     res.end();
@@ -441,17 +391,13 @@ setCors(res);
   ) {
     sendJson(res, 200, {
       status: "ok",
-
       derivConnected,
-
       oauthConfigured:
         Boolean(
           DERIV_CLIENT_ID
         ),
-
       markets:
         SYMBOLS.length,
-
       timestamp:
         Date.now()
     });
@@ -469,17 +415,12 @@ setCors(res);
   ) {
     sendJson(res, 200, {
       success: true,
-
-      backend:
-        "online",
-
+      backend: "online",
       derivConnected,
-
       oauthConfigured:
         Boolean(
           DERIV_CLIENT_ID
         ),
-
       symbols:
         SYMBOLS
     });
@@ -496,7 +437,7 @@ setCors(res);
     pathname === "/api/session"
   ) {
     const session =
-      getSession(req);
+      getSessionFromRequest(req);
 
     sendJson(res, 200, {
       authenticated:
@@ -511,7 +452,7 @@ setCors(res);
   }
 
   /* --------------------------------------------
-     ACCOUNTS
+     ACCOUNT
   -------------------------------------------- */
 
   if (
@@ -519,7 +460,7 @@ setCors(res);
     pathname === "/api/accounts"
   ) {
     const session =
-      getSession(req);
+      getSessionFromRequest(req);
 
     if (!session) {
       sendJson(res, 401, {
@@ -647,11 +588,6 @@ setCors(res);
       "Starting Deriv OAuth"
     );
 
-    console.log(
-      "OAuth redirect:",
-      DERIV_REDIRECT_URI
-    );
-
     redirect(
       res,
       authorizationUrl
@@ -705,7 +641,6 @@ setCors(res);
     if (!code || !state) {
       sendJson(res, 400, {
         success: false,
-
         error:
           "Missing OAuth code or state."
       });
@@ -721,7 +656,6 @@ setCors(res);
     if (!oauth) {
       sendJson(res, 400, {
         success: false,
-
         error:
           "Invalid or expired OAuth state."
       });
@@ -734,6 +668,7 @@ setCors(res);
     );
 
     try {
+
       const tokenResponse =
         await fetch(
           "https://auth.deriv.com/oauth2/token",
@@ -813,13 +748,14 @@ setCors(res);
         return;
       }
 
-      /*
-       * Get account information.
-       */
+      /* ----------------------------------------
+         GET DERIV ACCOUNT
+      ---------------------------------------- */
 
       let accounts = [];
 
       try {
+
         const ws =
           new WebSocket(
             DERIV_WS_URL
@@ -828,11 +764,13 @@ setCors(res);
         accounts =
           await new Promise(
             (resolve) => {
+
               let finished =
                 false;
 
               const finish =
                 (value) => {
+
                   if (finished)
                     return;
 
@@ -859,19 +797,23 @@ setCors(res);
               ws.on(
                 "open",
                 () => {
+
                   ws.send(
                     JSON.stringify({
                       authorize:
                         accessToken
                     })
                   );
+
                 }
               );
 
               ws.on(
                 "message",
                 (raw) => {
+
                   try {
+
                     const data =
                       JSON.parse(
                         raw.toString()
@@ -880,6 +822,7 @@ setCors(res);
                     if (
                       data.error
                     ) {
+
                       clearTimeout(
                         timer
                       );
@@ -890,6 +833,7 @@ setCors(res);
                       );
 
                       finish([]);
+
                       return;
                     }
 
@@ -897,86 +841,92 @@ setCors(res);
                       data.msg_type ===
                       "authorize"
                     ) {
+
                       clearTimeout(
                         timer
                       );
 
+                      const auth =
+                        data.authorize ||
+                        {};
+
                       finish([
                         {
                           loginid:
-                            data
-                              .authorize
-                              ?.loginid,
+                            auth.loginid,
 
                           fullname:
-                            data
-                              .authorize
-                              ?.fullname,
+                            auth.fullname,
 
                           currency:
-                            data
-                              .authorize
-                              ?.currency,
+                            auth.currency,
 
                           balance:
-                            data
-                              .authorize
-                              ?.balance,
+                            auth.balance,
 
                           email:
-                            data
-                              .authorize
-                              ?.email
+                            auth.email
                         }
                       ]);
+
                     }
+
                   } catch {
                     finish([]);
                   }
+
                 }
               );
 
               ws.on(
                 "error",
                 () => {
+
                   clearTimeout(
                     timer
                   );
 
                   finish([]);
+
                 }
               );
 
               ws.on(
                 "close",
                 () => {
+
                   clearTimeout(
                     timer
                   );
 
                   finish([]);
+
                 }
               );
+
             }
           );
+
       } catch (error) {
+
         console.error(
           "Account lookup failed:",
           error.message
         );
 
         accounts = [];
+
       }
 
-      /*
-       * Create session.
-       */
+      /* ----------------------------------------
+         CREATE SERVER SESSION
+      ---------------------------------------- */
 
-      const sessionId =
-        createSessionId();
+      const sessionToken =
+        createRandomToken();
 
       sessions.set(
-        sessionId,
+        sessionToken,
         {
           accessToken,
 
@@ -992,32 +942,56 @@ setCors(res);
           expiresAt:
             Date.now() +
             7 *
-              24 *
-              60 *
-              60 *
-              1000
+            24 *
+            60 *
+            60 *
+            1000
         }
       );
 
-      setSessionCookie(
-        res,
-        sessionId
+      /*
+       * Create a short-lived one-time handoff.
+       *
+       * The browser receives ONLY this temporary
+       * token, never the Deriv access token.
+       */
+
+      const handoffToken =
+        createRandomToken();
+
+      handoffs.set(
+        handoffToken,
+        {
+          sessionToken,
+
+          createdAt:
+            Date.now(),
+
+          expiresAt:
+            Date.now() +
+            60 * 1000
+        }
       );
 
       /*
-       * IMPORTANT:
-       * Correct frontend redirect.
+       * Redirect to GitHub Pages with the
+       * one-time handoff token.
        */
 
       redirect(
         res,
         frontend(
-          "/markets.html"
+          "/markets.html?handoff=" +
+          encodeURIComponent(
+            handoffToken
+          )
         )
       );
 
       return;
+
     } catch (error) {
+
       console.error(
         "OAuth callback error:",
         error
@@ -1035,6 +1009,94 @@ setCors(res);
   }
 
   /* --------------------------------------------
+     HANDOFF
+  -------------------------------------------- */
+
+  if (
+    req.method === "POST" &&
+    pathname === "/api/handoff"
+  ) {
+
+    const token =
+      parsed.searchParams.get(
+        "token"
+      );
+
+    if (!token) {
+      sendJson(res, 400, {
+        success: false,
+        error:
+          "Missing handoff token"
+      });
+
+      return;
+    }
+
+    const handoff =
+      handoffs.get(
+        token
+      );
+
+    if (!handoff) {
+      sendJson(res, 401, {
+        success: false,
+        error:
+          "Invalid handoff token"
+      });
+
+      return;
+    }
+
+    handoffs.delete(
+      token
+    );
+
+    if (
+      Date.now() >
+      handoff.expiresAt
+    ) {
+      sendJson(res, 401, {
+        success: false,
+        error:
+          "Handoff token expired"
+      });
+
+      return;
+    }
+
+    const session =
+      sessions.get(
+        handoff.sessionToken
+      );
+
+    if (!session) {
+      sendJson(res, 401, {
+        success: false,
+        error:
+          "Session expired"
+      });
+
+      return;
+    }
+
+    sendJson(res, 200, {
+      success: true,
+
+      sessionToken:
+        handoff.sessionToken,
+
+      user:
+        session.user,
+
+      accounts:
+        session.accounts ||
+        []
+    });
+
+    return;
+  }
+
+  /* --------------------------------------------
      LOGOUT
   -------------------------------------------- */
 
@@ -1042,16 +1104,15 @@ setCors(res);
     req.method === "POST" &&
     pathname === "/api/logout"
   ) {
+
     const session =
-      getSession(req);
+      getSessionFromRequest(req);
 
     if (session) {
       sessions.delete(
         session.id
       );
     }
-
-    clearSessionCookie(res);
 
     sendJson(res, 200, {
       success: true
@@ -1069,6 +1130,7 @@ setCors(res);
     error: "Not found",
     path: pathname
   });
+
 }
 
 );
@@ -1085,6 +1147,7 @@ server
 websocketServer.on(
 "connection",
 (client) => {
+
 clients.add(client);
 
 client.send(
@@ -1098,18 +1161,14 @@ client.send(
 client.on(
   "close",
   () => {
-    clients.delete(
-      client
-    );
+    clients.delete(client);
   }
 );
 
 client.on(
   "error",
   () => {
-    clients.delete(
-      client
-    );
+    clients.delete(client);
   }
 );
 
@@ -1123,8 +1182,9 @@ START SERVER
 server.listen(
 PORT,
 () => {
+
 console.log(
-"======================================"
+  "======================================"
 );
 
 console.log(
@@ -1179,19 +1239,23 @@ connectDeriv();
 process.on(
 "uncaughtException",
 (error) => {
+
 console.error(
-"UNCAUGHT EXCEPTION:",
-error
+  "UNCAUGHT EXCEPTION:",
+  error
 );
+
 }
 );
 
 process.on(
 "unhandledRejection",
 (error) => {
+
 console.error(
-"UNHANDLED REJECTION:",
-error
+  "UNHANDLED REJECTION:",
+  error
 );
+
 }
 );
